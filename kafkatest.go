@@ -15,6 +15,7 @@ import (
 	stdlog "log"
 	"math"
 	"os"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -30,6 +31,11 @@ var NUM_ITERATIONS = flag.Int("iterations", 100, "NUM_ITERATIONS number of messa
 
 func main() {
 	flag.Parse()
+
+	runtime.GOMAXPROCS(runtime.NumCPU())
+	log.Printf("GOMAXPROCS = %d\n", runtime.GOMAXPROCS(0))
+
+	start := time.Now()
 
 	// no URL means no kafka client
 	if KAFKA_BROKER == nil || *KAFKA_BROKER == "" {
@@ -74,27 +80,36 @@ func main() {
 
 	// and kick off readers for each partition
 	var wg sync.WaitGroup
+	var ready sync.WaitGroup
 	var m Measurements
-	m.Init("ms", 0.5)
+	m.Init("ms", 1)
 	for _, p := range partitions {
 		wg.Add(1)
-		go read_partition(cl, p, offsets[p], &m, &wg)
+		ready.Add(1)
+		go read_partition(cl, p, offsets[p], &m, &wg, &ready)
 	}
+
+	// wait for the consumers time to get connected and ready before we start publishing, otherwise we get the startup time included in the early measurements
+	ready.Wait()
 
 	// kick off a writer to the topic
 	// (actually we just do it inline)
 	wg.Add(1)
 	publish(cl, len(partitions), &wg)
+	log.Println("done publishing")
 
 	wg.Wait()
+	log.Println("done receiving")
 
 	fmt.Println(&m)
+	fmt.Printf("test ran %f ms and published and received %d messages\n", time.Since(start).Seconds()*1000, *NUM_ITERATIONS*len(partitions))
 }
 
 func publish(cl *sarama.Client, num_partitions int, wg *sync.WaitGroup) {
 	defer wg.Done()
+
 	var prod_conf = sarama.NewProducerConfig()
-	prod_conf.RequiredAcks = sarama.NoResponse
+	//prod_conf.RequiredAcks = sarama.NoResponse
 	prod_conf.Partitioner = sarama.NewRoundRobinPartitioner
 	prod, err := sarama.NewProducer(cl, prod_conf)
 	//prod, err := sarama.NewSimpleProducer(cl, *KAFKA_TOPIC, sarama.NewRoundRobinPartitioner)
@@ -102,23 +117,38 @@ func publish(cl *sarama.Client, num_partitions int, wg *sync.WaitGroup) {
 		fmt.Printf("ERROR creating kafka producer to %q: %s", *KAFKA_TOPIC, err)
 		return
 	}
+	defer prod.Close()
 	input := prod.Input()
+	errs := prod.Errors()
 
 	// send messages, each containing the local nsec timestamp
-	N := *NUM_ITERATIONS * num_partitions
-	for i := 0; i < N; i++ {
-		value := make([]byte, 8)
+	N := uint64(*NUM_ITERATIONS) * uint64(num_partitions)
+	var i uint64
+	for i = 0; i < N; i++ {
+		value := make([]byte, 16)
 		binary.BigEndian.PutUint64(value, uint64(time.Now().UnixNano()))
+		binary.BigEndian.PutUint64(value[8:], i) // out of curiosity, to more easily pick out which messages are which in an strace or pktcap
+		value[8] = byte('n')                     // same, use a uniqish string to ID the messages
+		value[9] = byte('s')
+		value[10] = byte('d')
 		msg := sarama.MessageToSend{Topic: *KAFKA_TOPIC, Value: sarama.ByteEncoder(value)}
-		input <- &msg
+		select {
+		case input <- &msg:
+			// great
+		case err := <-errs:
+			fmt.Printf("ERROR publishing to kafka: %s", err)
+			return
+		}
 	}
 }
 
-func read_partition(cl *sarama.Client, partition int32, offset int64, m *Measurements, wg *sync.WaitGroup) {
+func read_partition(cl *sarama.Client, partition int32, offset int64, m *Measurements, wg *sync.WaitGroup, ready *sync.WaitGroup) {
 	defer wg.Done()
 	con_config := sarama.NewConsumerConfig()
 	con_config.OffsetMethod = sarama.OffsetMethodNewest
-	con_config.OffsetValue = offset // not really needed unless we use OffsetMethodManual
+	con_config.OffsetValue = offset           // not really needed unless we use OffsetMethodManual
+	con_config.EventBufferSize = 1000         // we're sending a lot of tiny messages, 1000 is enough to buffer a block of them
+	con_config.MaxWaitTime = time.Millisecond // can't go below 1 msec
 	con, err := sarama.NewConsumer(cl, *KAFKA_TOPIC, partition, "", con_config)
 	if err != nil {
 		fmt.Printf("ERROR creating kafka subscription to %q: %s", *KAFKA_TOPIC, err)
@@ -128,6 +158,7 @@ func read_partition(cl *sarama.Client, partition int32, offset int64, m *Measure
 
 	// now loop receiving messages from this kafka/partition
 	N := *NUM_ITERATIONS
+	ready.Done()
 	for i := 0; i < N; i++ {
 		ev := <-con.Events()
 		now := time.Now()
