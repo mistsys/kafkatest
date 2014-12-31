@@ -35,8 +35,11 @@ var CHANNEL_BUFFER_SIZE = flag.Int("channel-buffer-size", 0, "kafka publisher go
 var PAUSE_BETWEEN_MSGS = flag.Int("pause", 0, "# of msgs between which the publisher pauses until the subscriber receives something")
 
 var MAX_WAIT_TIME = flag.Int("max-wait-time", 1, "kafka consumer max-wait-time (in msec)")
-var MIN_FETCH_SIZE = flag.Int("min-fetch-size", 1, "kafka consumer min data requested") 
+var MIN_FETCH_SIZE = flag.Int("min-fetch-size", 1, "kafka consumer min data requested")
 var EVENT_BUFFER_SIZE = flag.Int("event-buffer-size", 16, "kafka consumer go channel size")
+
+var CONSUME_ONLY = flag.Bool("consume-only", false, "only run the kafka consumer half")
+var PUBLISH_ONLY = flag.Bool("publish-only", false, "only run the kafka publisher half")
 
 func main() {
 	flag.Parse()
@@ -92,26 +95,31 @@ func main() {
 	var ready sync.WaitGroup
 	var m Measurements
 	m.Init("ms", 1)
-	for _, p := range partitions {
-		wg.Add(1)
-		ready.Add(1)
-		go read_partition(cl, p, offsets[p], &m, &wg, &ready)
+
+	if !*PUBLISH_ONLY {
+		for _, p := range partitions {
+			wg.Add(1)
+			ready.Add(1)
+			go read_partition(cl, p, offsets[p], &m, &wg, &ready)
+		}
+
+		// wait for the consumers time to get connected and ready before we start publishing, otherwise we get the startup time included in the early measurements
+		ready.Wait()
 	}
 
-	// wait for the consumers time to get connected and ready before we start publishing, otherwise we get the startup time included in the early measurements
-	ready.Wait()
-
-	// kick off a writer to the topic
-	// (actually we just do it inline)
-	wg.Add(1)
 	pub_start := time.Now()
-	publish(cl, len(partitions), &wg)
-	pub_dur := time.Since(pub_start)
-	log.Println("done publishing in", pub_dur, ",", float64(*NUM_ITERATIONS*len(partitions)) / pub_dur.Seconds(), "msgs/sec")
+	if !*CONSUME_ONLY {
+		// kick off a writer to the topic
+		// (actually we just do it inline)
+		wg.Add(1)
+		publish(cl, len(partitions), &wg)
+		pub_dur := time.Since(pub_start)
+		log.Println("done publishing in", pub_dur, ",", float64(*NUM_ITERATIONS*len(partitions))/pub_dur.Seconds(), "msgs/sec")
+	}
 
 	wg.Wait()
 	con_dur := time.Since(pub_start)
-	log.Println("done consuming in", con_dur, ",", float64(*NUM_ITERATIONS*len(partitions)) / con_dur.Seconds(), "msgs/sec")
+	log.Println("done consuming in", con_dur, ",", float64(*NUM_ITERATIONS*len(partitions))/con_dur.Seconds(), "msgs/sec")
 
 	fmt.Println(&m)
 	fmt.Printf("test ran %f ms and published and received %d messages\n", time.Since(start).Seconds()*1000, *NUM_ITERATIONS*len(partitions))
@@ -171,9 +179,9 @@ func read_partition(cl *sarama.Client, partition int32, offset int64, m *Measure
 	defer wg.Done()
 	con_config := sarama.NewConsumerConfig()
 	con_config.OffsetMethod = sarama.OffsetMethodNewest
-	con_config.OffsetValue = offset           // not really needed unless we use OffsetMethodManual
+	con_config.OffsetValue = offset // not really needed unless we use OffsetMethodManual
 	con_config.EventBufferSize = *EVENT_BUFFER_SIZE
-	con_config.MaxWaitTime = time.Duration(*MAX_WAIT_TIME)*time.Millisecond // can't go below 1 msec
+	con_config.MaxWaitTime = time.Duration(*MAX_WAIT_TIME) * time.Millisecond // can't go below 1 msec
 	con_config.MinFetchSize = int32(*MIN_FETCH_SIZE)
 	fmt.Printf("ConsumerConfig %+v\n", con_config)
 	con, err := sarama.NewConsumer(cl, *KAFKA_TOPIC, partition, "", con_config)
@@ -198,7 +206,7 @@ func read_partition(cl *sarama.Client, partition int32, offset int64, m *Measure
 		//os.Stdout.WriteString(fmt.Sprintf("ev.Key = %T %s\n%v\n"+ "ev.Value = %T %s\n%v\n", ev.Key, ev.Key, ev.Key, ev.Value, ev.Value, ev.Value))
 		delta := now.UnixNano() - int64(binary.BigEndian.Uint64(ev.Value))
 		if i >= S {
-			m.Accumulate(float64(delta)/1000000)
+			m.Accumulate(float64(delta) / 1000000)
 		}
 	}
 }
@@ -242,7 +250,7 @@ func (m *Measurements) Accumulate(x float64) {
 	}
 
 	if m.binsize != 0 {
-		b := int64(math.Floor((x / m.binsize)+0.5)) // really I would want an arbitrary large int, but this will do for my data ranges
+		b := int64(math.Floor((x / m.binsize) + 0.5)) // really I would want an arbitrary large int, but this will do for my data ranges
 		m.counts[b]++
 	} // else don't accumulate pop counts
 }
@@ -296,7 +304,7 @@ func (m *Measurements) String() string {
 				c += m.counts[b+o]
 			}
 			accu += c
-			percent := 100 * float64(accu)/float64(m.n)
+			percent := 100 * float64(accu) / float64(m.n)
 			cc := int(math.Ceil(float64(c) * c_scale))
 			s := fmt.Sprintf("%6.1f %5.1f%% %6d: %s", x, percent, c, strings.Repeat("*", cc))
 			sa = append(sa, s)
