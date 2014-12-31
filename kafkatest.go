@@ -16,7 +16,6 @@ import (
 	"math"
 	"os"
 	"runtime"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -29,10 +28,17 @@ var KAFKA_BROKER = flag.String("kafka", "kafka-000-staging.mistsys.net:6667", "K
 var KAFKA_TOPIC = flag.String("topic", "user_profile_test", "KAFKA_TOPIC the kafka topic to which to publish and subscribe")
 var NUM_ITERATIONS = flag.Int("iterations", 100, "NUM_ITERATIONS number of messages to publish to each partition")
 
+var NUM_SKIP = flag.Int("skip", 0, "NUM_SKIP number of messages to skip before accumlulating statistics")
+var NO_RESPONSE = flag.Bool("no-response", false, "kafka publisher doesn't wait for reponses")
+var FLUSH_MSG_COUNT = flag.Int("flush-msg-count", 0, "this many messages queued up triggers a flush in the kafka publisher")
+var CHANNEL_BUFFER_SIZE = flag.Int("channel-buffer-size", 0, "kafka publisher go channel size")
+
+var MAX_WAIT_TIME = flag.Int("max-wait-time", 1, "kafka subscription max-wait-time (in msec)")
+
 func main() {
 	flag.Parse()
 
-	runtime.GOMAXPROCS(runtime.NumCPU())
+	//runtime.GOMAXPROCS(runtime.NumCPU())
 	log.Printf("GOMAXPROCS = %d\n", runtime.GOMAXPROCS(0))
 
 	start := time.Now()
@@ -95,11 +101,12 @@ func main() {
 	// kick off a writer to the topic
 	// (actually we just do it inline)
 	wg.Add(1)
+	pub_start := time.Now()
 	publish(cl, len(partitions), &wg)
-	log.Println("done publishing")
+	log.Println("done publishing in", time.Since(pub_start))
 
 	wg.Wait()
-	log.Println("done receiving")
+	log.Println("done receiving in", time.Since(pub_start))
 
 	fmt.Println(&m)
 	fmt.Printf("test ran %f ms and published and received %d messages\n", time.Since(start).Seconds()*1000, *NUM_ITERATIONS*len(partitions))
@@ -109,10 +116,14 @@ func publish(cl *sarama.Client, num_partitions int, wg *sync.WaitGroup) {
 	defer wg.Done()
 
 	var prod_conf = sarama.NewProducerConfig()
-	//prod_conf.RequiredAcks = sarama.NoResponse
+	if *NO_RESPONSE {
+		prod_conf.RequiredAcks = sarama.NoResponse // enabling NoResponse also has the side effect of making the publisher send each message to the TCP socket immediately
+	}
+	prod_conf.FlushMsgCount = *FLUSH_MSG_COUNT
+	prod_conf.ChannelBufferSize = *CHANNEL_BUFFER_SIZE
 	prod_conf.Partitioner = sarama.NewRoundRobinPartitioner
+	fmt.Printf("ProducerConfig %+v\n", prod_conf)
 	prod, err := sarama.NewProducer(cl, prod_conf)
-	//prod, err := sarama.NewSimpleProducer(cl, *KAFKA_TOPIC, sarama.NewRoundRobinPartitioner)
 	if err != nil {
 		fmt.Printf("ERROR creating kafka producer to %q: %s", *KAFKA_TOPIC, err)
 		return
@@ -148,7 +159,8 @@ func read_partition(cl *sarama.Client, partition int32, offset int64, m *Measure
 	con_config.OffsetMethod = sarama.OffsetMethodNewest
 	con_config.OffsetValue = offset           // not really needed unless we use OffsetMethodManual
 	con_config.EventBufferSize = 1000         // we're sending a lot of tiny messages, 1000 is enough to buffer a block of them
-	con_config.MaxWaitTime = time.Millisecond // can't go below 1 msec
+	con_config.MaxWaitTime = time.Duration(*MAX_WAIT_TIME)*time.Millisecond // can't go below 1 msec
+	fmt.Printf("ConsumerConfig %+v\n", con_config)
 	con, err := sarama.NewConsumer(cl, *KAFKA_TOPIC, partition, "", con_config)
 	if err != nil {
 		fmt.Printf("ERROR creating kafka subscription to %q: %s", *KAFKA_TOPIC, err)
@@ -158,6 +170,7 @@ func read_partition(cl *sarama.Client, partition int32, offset int64, m *Measure
 
 	// now loop receiving messages from this kafka/partition
 	N := *NUM_ITERATIONS
+	S := *NUM_SKIP
 	ready.Done()
 	for i := 0; i < N; i++ {
 		ev := <-con.Events()
@@ -169,7 +182,9 @@ func read_partition(cl *sarama.Client, partition int32, offset int64, m *Measure
 		// print in one call to write() so that we don't interleave with writes from other partitions
 		//os.Stdout.WriteString(fmt.Sprintf("ev.Key = %T %s\n%v\n"+ "ev.Value = %T %s\n%v\n", ev.Key, ev.Key, ev.Key, ev.Value, ev.Value, ev.Value))
 		delta := now.UnixNano() - int64(binary.BigEndian.Uint64(ev.Value))
-		m.Accumulate(float64(delta)/1000000, now)
+		if i > S {
+			m.Accumulate(float64(delta)/1000000)
+		}
 	}
 }
 
@@ -184,12 +199,6 @@ type Measurements struct {
 	n        int     // # of times x was accumulated
 	sum      float64 // sum of all x
 	min, max float64
-	top10    []TopTen // top 10 slowest accesses
-}
-
-type TopTen struct {
-	value float64   // the value of x
-	when  time.Time // timestamp when max x happened
 }
 
 func (m *Measurements) Init(units string, binsize float64) {
@@ -201,12 +210,10 @@ func (m *Measurements) Init(units string, binsize float64) {
 	if m.binsize != 0 {
 		m.counts = make(map[int64]uint64)
 	}
-
-	m.top10 = make([]TopTen, 0, 10)
 }
 
 // add sample x to m
-func (m *Measurements) Accumulate(x float64, when time.Time) {
+func (m *Measurements) Accumulate(x float64) {
 	m.lock.Lock()
 	defer m.lock.Unlock()
 
@@ -217,18 +224,6 @@ func (m *Measurements) Accumulate(x float64, when time.Time) {
 	}
 	if x > m.max {
 		m.max = x
-	}
-	topN := len(m.top10)
-	if topN < cap(m.top10) || x > m.top10[topN-1].value {
-		// insert x into the top10 array
-		idx := sort.Search(topN, func(i int) bool { return x > m.top10[i].value })
-		if topN < cap(m.top10) {
-			m.top10 = append(m.top10, TopTen{})
-		}
-		copy(m.top10[idx+1:], m.top10[idx:])
-		e := &m.top10[idx]
-		e.value = x
-		e.when = when
 	}
 
 	if m.binsize != 0 {
@@ -287,13 +282,6 @@ func (m *Measurements) String() string {
 			cc := int(math.Ceil(float64(c) * c_scale))
 			s := fmt.Sprintf("%6.1f %6d: %s", x, c, strings.Repeat("*", cc))
 			sa = append(sa, s)
-		}
-	}
-
-	if len(m.top10) != 0 {
-		sa = append(sa, fmt.Sprintf("Top %d slowest :", len(m.top10)))
-		for i, tt := range m.top10 {
-			sa = append(sa, fmt.Sprintf(" %2d. %f %s at %s", i+1, tt.value, m.units, tt.when.UTC()))
 		}
 	}
 
