@@ -118,11 +118,16 @@ func main() {
 	}
 
 	wg.Wait()
-	con_dur := time.Since(pub_start)
-	log.Println("done consuming in", con_dur, ",", float64(*NUM_ITERATIONS*len(partitions))/con_dur.Seconds(), "msgs/sec")
 
-	fmt.Println(&m)
-	fmt.Printf("test ran %f ms and published and received %d messages\n", time.Since(start).Seconds()*1000, *NUM_ITERATIONS*len(partitions))
+	if !*PUBLISH_ONLY {
+		con_dur := time.Since(pub_start)
+		log.Println("done consuming in", con_dur, ",", float64(*NUM_ITERATIONS*len(partitions))/con_dur.Seconds(), "msgs/sec")
+
+		fmt.Println(&m)
+		fmt.Printf("test ran %f ms and published and received %d messages\n", time.Since(start).Seconds()*1000, *NUM_ITERATIONS*len(partitions))
+	} else {
+		fmt.Printf("test ran %f ms and published %d messages\n", time.Since(start).Seconds()*1000, *NUM_ITERATIONS*len(partitions))
+	}
 }
 
 func publish(cl *sarama.Client, num_partitions int, wg *sync.WaitGroup) {
