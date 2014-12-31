@@ -216,9 +216,9 @@ func read_partition(cl *sarama.Client, partition int32, offset int64, m *Measure
 		if i >= S {
 			m.Accumulate(float64(delta) / 1000000)
 		}
-		if *CONSUME_ONLY && partition == 0 {
-			// use the time the 1st message arrives as the best guess at the start time
-			pub_start = now
+		if i == 0 && *CONSUME_ONLY && partition == 0 {
+			// use the time in the 1st message as the best guess at the start time
+			pub_start = now.Add(-time.Duration(delta) * time.Nanosecond)
 			fmt.Println("started receiving msgs")
 		}
 	}
