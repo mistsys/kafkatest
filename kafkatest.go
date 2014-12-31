@@ -106,10 +106,12 @@ func main() {
 	wg.Add(1)
 	pub_start := time.Now()
 	publish(cl, len(partitions), &wg)
-	log.Println("done publishing in", time.Since(pub_start))
+	pub_dur := time.Since(pub_start)
+	log.Println("done publishing in", pub_dur, ",", float64(*NUM_ITERATIONS*len(partitions)) / pub_dur.Seconds(), "msgs/sec")
 
 	wg.Wait()
-	log.Println("done receiving in", time.Since(pub_start))
+	con_dur := time.Since(pub_start)
+	log.Println("done consuming in", con_dur, ",", float64(*NUM_ITERATIONS*len(partitions)) / con_dur.Seconds(), "msgs/sec")
 
 	fmt.Println(&m)
 	fmt.Printf("test ran %f ms and published and received %d messages\n", time.Since(start).Seconds()*1000, *NUM_ITERATIONS*len(partitions))
@@ -157,7 +159,8 @@ func publish(cl *sarama.Client, num_partitions int, wg *sync.WaitGroup) {
 		}
 
 		if j == P {
-			time.Sleep(time.Nanosecond)
+			time.Sleep(time.Nanosecond) // NOTE the actual delay is rounded way up by the runtime and kernel
+			//runtime.Gosched() // yielding to the go scheduler has no effect
 			j = 0
 		}
 		j++
@@ -295,7 +298,7 @@ func (m *Measurements) String() string {
 			accu += c
 			percent := 100 * float64(accu)/float64(m.n)
 			cc := int(math.Ceil(float64(c) * c_scale))
-			s := fmt.Sprintf("%6.1f %3.1f%% %6d: %s", x, percent, c, strings.Repeat("*", cc))
+			s := fmt.Sprintf("%6.1f %5.1f%% %6d: %s", x, percent, c, strings.Repeat("*", cc))
 			sa = append(sa, s)
 		}
 	}
