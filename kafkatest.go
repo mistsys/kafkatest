@@ -32,8 +32,11 @@ var NUM_SKIP = flag.Int("skip", 0, "NUM_SKIP number of messages to skip before a
 var NO_RESPONSE = flag.Bool("no-response", false, "kafka publisher doesn't wait for reponses")
 var FLUSH_MSG_COUNT = flag.Int("flush-msg-count", 0, "this many messages queued up triggers a flush in the kafka publisher")
 var CHANNEL_BUFFER_SIZE = flag.Int("channel-buffer-size", 0, "kafka publisher go channel size")
+var PAUSE_BETWEEN_MSGS = flag.Int("pause", 0, "# of msgs between which the publisher pauses until the subscriber receives something")
 
-var MAX_WAIT_TIME = flag.Int("max-wait-time", 1, "kafka subscription max-wait-time (in msec)")
+var MAX_WAIT_TIME = flag.Int("max-wait-time", 1, "kafka consumer max-wait-time (in msec)")
+var MIN_FETCH_SIZE = flag.Int("min-fetch-size", 1, "kafka consumer min data requested") 
+var EVENT_BUFFER_SIZE = flag.Int("event-buffer-size", 16, "kafka consumer go channel size")
 
 func main() {
 	flag.Parse()
@@ -134,7 +137,9 @@ func publish(cl *sarama.Client, num_partitions int, wg *sync.WaitGroup) {
 
 	// send messages, each containing the local nsec timestamp
 	N := uint64(*NUM_ITERATIONS) * uint64(num_partitions)
+	P := *PAUSE_BETWEEN_MSGS
 	var i uint64
+	var j = 1
 	for i = 0; i < N; i++ {
 		value := make([]byte, 16)
 		binary.BigEndian.PutUint64(value, uint64(time.Now().UnixNano()))
@@ -150,6 +155,12 @@ func publish(cl *sarama.Client, num_partitions int, wg *sync.WaitGroup) {
 			fmt.Printf("ERROR publishing to kafka: %s", err)
 			return
 		}
+
+		if j == P {
+			time.Sleep(time.Nanosecond)
+			j = 0
+		}
+		j++
 	}
 }
 
@@ -158,8 +169,9 @@ func read_partition(cl *sarama.Client, partition int32, offset int64, m *Measure
 	con_config := sarama.NewConsumerConfig()
 	con_config.OffsetMethod = sarama.OffsetMethodNewest
 	con_config.OffsetValue = offset           // not really needed unless we use OffsetMethodManual
-	con_config.EventBufferSize = 1000         // we're sending a lot of tiny messages, 1000 is enough to buffer a block of them
+	con_config.EventBufferSize = *EVENT_BUFFER_SIZE
 	con_config.MaxWaitTime = time.Duration(*MAX_WAIT_TIME)*time.Millisecond // can't go below 1 msec
+	con_config.MinFetchSize = int32(*MIN_FETCH_SIZE)
 	fmt.Printf("ConsumerConfig %+v\n", con_config)
 	con, err := sarama.NewConsumer(cl, *KAFKA_TOPIC, partition, "", con_config)
 	if err != nil {
@@ -182,7 +194,7 @@ func read_partition(cl *sarama.Client, partition int32, offset int64, m *Measure
 		// print in one call to write() so that we don't interleave with writes from other partitions
 		//os.Stdout.WriteString(fmt.Sprintf("ev.Key = %T %s\n%v\n"+ "ev.Value = %T %s\n%v\n", ev.Key, ev.Key, ev.Key, ev.Value, ev.Value, ev.Value))
 		delta := now.UnixNano() - int64(binary.BigEndian.Uint64(ev.Value))
-		if i > S {
+		if i >= S {
 			m.Accumulate(float64(delta)/1000000)
 		}
 	}
@@ -227,7 +239,7 @@ func (m *Measurements) Accumulate(x float64) {
 	}
 
 	if m.binsize != 0 {
-		b := int64(math.Floor(x / m.binsize)) // really I would want an arbitrary large int, but this will do for my data ranges
+		b := int64(math.Floor((x / m.binsize)+0.5)) // really I would want an arbitrary large int, but this will do for my data ranges
 		m.counts[b]++
 	} // else don't accumulate pop counts
 }
@@ -256,7 +268,7 @@ func (m *Measurements) String() string {
 		// and figure out the largest count
 		var max_c uint64 = 0
 		for b := first_bin; b < last_bin; b += bins_per_row {
-			c := m.counts[b]
+			var c uint64
 			for o := int64(0); o < bins_per_row; o++ {
 				c += m.counts[b+o]
 			}
@@ -273,14 +285,17 @@ func (m *Measurements) String() string {
 		x_last := float64(last_bin) * m.binsize
 		x_scale := (x_last - x_first) / float64(bins)
 
+		var accu uint64
 		for b := first_bin; b < last_bin; b += bins_per_row {
 			x := (float64(b) + float64(bins_per_row-1)/2) * x_scale
-			c := m.counts[b]
+			var c uint64
 			for o := int64(0); o < bins_per_row; o++ {
 				c += m.counts[b+o]
 			}
+			accu += c
+			percent := 100 * float64(accu)/float64(m.n)
 			cc := int(math.Ceil(float64(c) * c_scale))
-			s := fmt.Sprintf("%6.1f %6d: %s", x, c, strings.Repeat("*", cc))
+			s := fmt.Sprintf("%6.1f %3.1f%% %6d: %s", x, percent, c, strings.Repeat("*", cc))
 			sa = append(sa, s)
 		}
 	}
