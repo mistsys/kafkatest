@@ -41,6 +41,9 @@ var EVENT_BUFFER_SIZE = flag.Int("event-buffer-size", 16, "kafka consumer go cha
 var CONSUME_ONLY = flag.Bool("consume-only", false, "only run the kafka consumer half")
 var PUBLISH_ONLY = flag.Bool("publish-only", false, "only run the kafka publisher half")
 
+// time at which we started publishing (or the time of the 1st received message if we are just a consumer)
+var pub_start time.Time
+
 func main() {
 	flag.Parse()
 
@@ -107,11 +110,11 @@ func main() {
 		ready.Wait()
 	}
 
-	pub_start := time.Now()
 	if !*CONSUME_ONLY {
 		// kick off a writer to the topic
 		// (actually we just do it inline)
 		wg.Add(1)
+		pub_start = time.Now()
 		publish(cl, len(partitions), &wg)
 		pub_dur := time.Since(pub_start)
 		log.Println("done publishing in", pub_dur, ",", float64(*NUM_ITERATIONS*len(partitions))/pub_dur.Seconds(), "msgs/sec")
@@ -212,6 +215,11 @@ func read_partition(cl *sarama.Client, partition int32, offset int64, m *Measure
 		delta := now.UnixNano() - int64(binary.BigEndian.Uint64(ev.Value))
 		if i >= S {
 			m.Accumulate(float64(delta) / 1000000)
+		}
+		if *CONSUME_ONLY && partition == 0 {
+			// use the time the 1st message arrives as the best guess at the start time
+			pub_start = now
+			fmt.Println("started receiving msgs")
 		}
 	}
 }
