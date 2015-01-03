@@ -32,7 +32,8 @@ var NUM_SKIP = flag.Int("skip", 0, "NUM_SKIP number of messages to skip before a
 var NO_RESPONSE = flag.Bool("no-response", false, "kafka publisher doesn't wait for reponses")
 var FLUSH_MSG_COUNT = flag.Int("flush-msg-count", 0, "this many messages queued up triggers a flush in the kafka publisher")
 var CHANNEL_BUFFER_SIZE = flag.Int("channel-buffer-size", 0, "kafka publisher go channel size")
-var PAUSE_BETWEEN_MSGS = flag.Int("pause", 0, "# of msgs between which the publisher pauses until the subscriber receives something")
+var PAUSE_BETWEEN_MSGS = flag.Int("pause", 0, "# of msgs between which the publisher pauses very briefly")
+var MSG_RATE = flag.Float64("rate", 0, "msgs/sec rate at which to send messages (not useful for very high rates, but can go below 1.0 if desired)")
 
 var MAX_WAIT_TIME = flag.Int("max-wait-time", 1, "kafka consumer max-wait-time (in msec)")
 var MIN_FETCH_SIZE = flag.Int("min-fetch-size", 1, "kafka consumer min data requested")
@@ -156,6 +157,16 @@ func publish(cl *sarama.Client, num_partitions int, wg *sync.WaitGroup) {
 	// send messages, each containing the local nsec timestamp
 	N := uint64(*NUM_ITERATIONS) * uint64(num_partitions)
 	P := *PAUSE_BETWEEN_MSGS
+	R := *MSG_RATE
+	var T <-chan time.Time
+	if R != 0 {
+		interval := time.Duration(float64(time.Second) / R)
+		T = time.Tick(interval)
+	} else {
+		t := make(chan time.Time)
+		close(t)
+		T = t
+	}
 	var i uint64
 	var j = 1
 	for i = 0; i < N; i++ {
@@ -173,6 +184,9 @@ func publish(cl *sarama.Client, num_partitions int, wg *sync.WaitGroup) {
 			fmt.Printf("ERROR publishing to kafka: %s", err)
 			return
 		}
+
+		// pause between messages (or, if no rate was specified, then T is an already closed channel and this does nothing very quickly)
+		<-T
 
 		if j == P {
 			time.Sleep(time.Nanosecond) // NOTE the actual delay is rounded way up by the runtime and kernel
