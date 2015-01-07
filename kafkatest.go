@@ -34,6 +34,7 @@ var FLUSH_MSG_COUNT = flag.Int("flush-msg-count", 0, "this many messages queued 
 var CHANNEL_BUFFER_SIZE = flag.Int("channel-buffer-size", 0, "kafka publisher go channel size")
 var PAUSE_BETWEEN_MSGS = flag.Int("pause", 0, "# of msgs between which the publisher pauses very briefly")
 var MSG_RATE = flag.Float64("rate", 0, "msgs/sec rate at which to send messages (not useful for very high rates, but can go below 1.0 if desired)")
+var MSG_RTT = flag.Bool("rtt", false, "send next message as soon as the previous message arrives (only one message outstanding at a time)")
 
 var MAX_WAIT_TIME = flag.Int("max-wait-time", 1, "kafka consumer max-wait-time (in msec)")
 var MIN_FETCH_SIZE = flag.Int("min-fetch-size", 1, "kafka consumer min data requested")
@@ -45,6 +46,9 @@ var PUBLISH_ONLY = flag.Bool("publish-only", false, "only run the kafka publishe
 // time at which we started publishing (or the time of the 1st received message if we are just a consumer)
 var pub_start time.Time
 
+// channel used to signal that the receiver has consumer a message (used with MSG_RTT)
+var rtt_wait = make(chan struct{}, 1)
+
 func main() {
 	flag.Parse()
 
@@ -53,9 +57,15 @@ func main() {
 
 	start := time.Now()
 
+	// MSG_RTT without being both producer and consumer makes no sense
+	if *MSG_RTT && (*CONSUME_ONLY || *PUBLISH_ONLY) {
+		fmt.Printf("ERROR: -rtt without also being both producer and consumer makes no sense")
+		return
+	}
+
 	// no URL means no kafka client
 	if KAFKA_BROKER == nil || *KAFKA_BROKER == "" {
-		fmt.Printf("kafka broker URL must be specified\n")
+		fmt.Printf("ERROR: kafka broker URL must be specified\n")
 		return
 	}
 
@@ -112,7 +122,7 @@ func main() {
 	}
 
 	if !*CONSUME_ONLY {
-		// kick off a writer to the topic
+		// kick off a publisher to the topic
 		// (actually we just do it inline)
 		wg.Add(1)
 		pub_start = time.Now()
@@ -157,6 +167,7 @@ func publish(cl *sarama.Client, num_partitions int, wg *sync.WaitGroup) {
 	// send messages, each containing the local nsec timestamp
 	N := uint64(*NUM_ITERATIONS) * uint64(num_partitions)
 	P := *PAUSE_BETWEEN_MSGS
+
 	R := *MSG_RATE
 	var T <-chan time.Time
 	if R != 0 {
@@ -167,6 +178,17 @@ func publish(cl *sarama.Client, num_partitions int, wg *sync.WaitGroup) {
 		close(t)
 		T = t
 	}
+
+	RTT := *MSG_RTT
+	var W <-chan struct{}
+	if RTT {
+		W = rtt_wait
+	} else {
+		w := make(chan struct{})
+		close(w)
+		W = w
+	}
+
 	var i uint64
 	var j = 1
 	for i = 0; i < N; i++ {
@@ -187,6 +209,9 @@ func publish(cl *sarama.Client, num_partitions int, wg *sync.WaitGroup) {
 
 		// pause between messages (or, if no rate was specified, then T is an already closed channel and this does nothing very quickly)
 		<-T
+
+		// pause waiting for the rtt (or, it no rate was specified, then W is already closed)
+		<-W
 
 		if j == P {
 			time.Sleep(time.Nanosecond) // NOTE the actual delay is rounded way up by the runtime and kernel
@@ -234,6 +259,12 @@ func read_partition(cl *sarama.Client, partition int32, offset int64, m *Measure
 			// use the time in the 1st message as the best guess at the start time
 			pub_start = now.Add(-time.Duration(delta) * time.Nanosecond)
 			fmt.Println("started receiving msgs")
+		}
+
+		// tell the publisher we're ready, if it cares
+		select {
+		case rtt_wait <- struct{}{}:
+		default:
 		}
 	}
 }
