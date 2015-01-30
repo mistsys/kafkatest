@@ -35,7 +35,7 @@ Example uses:
       kafkatest -kafka ... -topic ... -rtt
 ````
       
-      Output looks like
+  Output looks like
       
 ````
         ndade@mist-004:~/go/src/github.com/mistsys/kafkatest$ kafkatest -kafka my-kafka-server.com:6667 -topic my_test_topic -rtt
@@ -98,6 +98,7 @@ Example uses:
         kafkatest -kafka ... -topic ... -iterations 10000 -rate 4000
 ````
 
+  Output looks like
 
 ````
         ndade@mist-004:~/go/src/github.com/mistsys/kafkatest$ kafkatest -kafka my-kafka-server.com:6667 -topic my_test_topic -iterations 10000 -rate 4000
