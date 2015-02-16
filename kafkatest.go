@@ -111,10 +111,19 @@ func main() {
 	m.Init("ms", 1)
 
 	if !*PUBLISH_ONLY {
+		con_config := sarama.NewConsumerConfig()
+		con_config.MaxWaitTime = time.Duration(*MAX_WAIT_TIME) * time.Millisecond // can't go below 1 msec
+		con_config.MinFetchSize = int32(*MIN_FETCH_SIZE)
+		fmt.Printf("ConsumerConfig %+v\n", con_config)
+		con, err := sarama.NewConsumer(cl, con_config)
+		if err != nil {
+			fmt.Printf("ERROR creating consumer: %s\n", err)
+			return
+		}
 		for _, p := range partitions {
 			wg.Add(1)
 			ready.Add(1)
-			go read_partition(cl, p, offsets[p], &m, &wg, &ready)
+			go read_partition(con, p, offsets[p], &m, &wg, &ready)
 		}
 
 		// wait for the consumers time to get connected and ready before we start publishing, otherwise we get the startup time included in the early measurements
@@ -222,28 +231,26 @@ func publish(cl *sarama.Client, num_partitions int, wg *sync.WaitGroup) {
 	}
 }
 
-func read_partition(cl *sarama.Client, partition int32, offset int64, m *Measurements, wg *sync.WaitGroup, ready *sync.WaitGroup) {
+func read_partition(con *sarama.Consumer, partition int32, offset int64, m *Measurements, wg *sync.WaitGroup, ready *sync.WaitGroup) {
 	defer wg.Done()
-	con_config := sarama.NewConsumerConfig()
-	con_config.OffsetMethod = sarama.OffsetMethodNewest
-	con_config.OffsetValue = offset // not really needed unless we use OffsetMethodManual
-	con_config.EventBufferSize = *EVENT_BUFFER_SIZE
-	con_config.MaxWaitTime = time.Duration(*MAX_WAIT_TIME) * time.Millisecond // can't go below 1 msec
-	con_config.MinFetchSize = int32(*MIN_FETCH_SIZE)
-	fmt.Printf("ConsumerConfig %+v\n", con_config)
-	con, err := sarama.NewConsumer(cl, *KAFKA_TOPIC, partition, "", con_config)
+	pcon_config := sarama.NewPartitionConsumerConfig()
+	pcon_config.OffsetMethod = sarama.OffsetMethodNewest
+	pcon_config.OffsetValue = offset // not really needed unless we use OffsetMethodManual
+	pcon_config.EventBufferSize = *EVENT_BUFFER_SIZE
+	fmt.Printf("PartitionConsumerConfig %+v\n", pcon_config)
+	pcon, err := con.ConsumePartition(*KAFKA_TOPIC, partition, pcon_config)
 	if err != nil {
 		fmt.Printf("ERROR creating kafka subscription to %q: %s", *KAFKA_TOPIC, err)
 		return
 	}
-	defer con.Close()
+	defer pcon.Close()
 
 	// now loop receiving messages from this kafka/partition
 	N := *NUM_ITERATIONS
 	S := *NUM_SKIP
 	ready.Done()
 	for i := 0; i < N; i++ {
-		ev := <-con.Events()
+		ev := <-pcon.Events()
 		now := time.Now()
 		if ev.Err != nil {
 			fmt.Printf("ERROR receiving kafka message: %s\n", ev.Err)
