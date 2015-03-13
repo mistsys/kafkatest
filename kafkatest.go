@@ -31,14 +31,13 @@ var NUM_ITERATIONS = flag.Int("iterations", 100, "NUM_ITERATIONS number of messa
 var NUM_SKIP = flag.Int("skip", 0, "NUM_SKIP number of messages to skip before accumlulating statistics")
 var NO_RESPONSE = flag.Bool("no-response", false, "kafka publisher doesn't wait for reponses")
 var FLUSH_MSG_COUNT = flag.Int("flush-msg-count", 0, "this many messages queued up triggers a flush in the kafka publisher")
-var CHANNEL_BUFFER_SIZE = flag.Int("channel-buffer-size", 0, "kafka publisher go channel size")
+var CHANNEL_BUFFER_SIZE = flag.Int("channel-buffer-size", 256, "kafka go channel size")
 var PAUSE_BETWEEN_MSGS = flag.Int("pause", 0, "# of msgs between which the publisher pauses very briefly")
 var MSG_RATE = flag.Float64("rate", 0, "msgs/sec rate at which to send messages (not useful for very high rates, but can go below 1.0 if desired)")
 var MSG_RTT = flag.Bool("rtt", false, "send next message as soon as the previous message arrives (only one message outstanding at a time)")
 
 var MAX_WAIT_TIME = flag.Int("max-wait-time", 1, "kafka consumer max-wait-time (in msec)")
 var MIN_FETCH_SIZE = flag.Int("min-fetch-size", 1, "kafka consumer min data requested")
-var EVENT_BUFFER_SIZE = flag.Int("event-buffer-size", 16, "kafka consumer go channel size")
 
 var CONSUME_ONLY = flag.Bool("consume-only", false, "only run the kafka consumer half")
 var PUBLISH_ONLY = flag.Bool("publish-only", false, "only run the kafka publisher half")
@@ -73,7 +72,19 @@ func main() {
 	sarama.Logger = log
 
 	// start a kafka client and listen to the topic
-	cl, err := sarama.NewClient("kafkatest", []string{*KAFKA_BROKER}, nil)
+	conf := sarama.NewConfig()
+	conf.ClientID = "kafkatest"
+	conf.Consumer.MaxWaitTime = time.Duration(*MAX_WAIT_TIME) * time.Millisecond // can't go below 1 msec
+	conf.Consumer.Fetch.Min = int32(*MIN_FETCH_SIZE)
+	if *NO_RESPONSE {
+		conf.Producer.RequiredAcks = sarama.NoResponse // enabling NoResponse also has the side effect of making the publisher send each message to the TCP socket immediately
+	}
+	conf.Producer.Flush.Messages = *FLUSH_MSG_COUNT
+	conf.Producer.Partitioner = sarama.NewRoundRobinPartitioner
+	conf.ChannelBufferSize = *CHANNEL_BUFFER_SIZE
+	fmt.Printf("Kafka client's Config %+v\n", conf)
+
+	cl, err := sarama.NewClient([]string{*KAFKA_BROKER}, conf)
 	if err != nil {
 		fmt.Printf("ERROR creating kafka client to %q: %s", *KAFKA_BROKER, err)
 		return
@@ -111,11 +122,7 @@ func main() {
 	m.Init("ms", 1)
 
 	if !*PUBLISH_ONLY {
-		con_config := sarama.NewConsumerConfig()
-		con_config.MaxWaitTime = time.Duration(*MAX_WAIT_TIME) * time.Millisecond // can't go below 1 msec
-		con_config.MinFetchSize = int32(*MIN_FETCH_SIZE)
-		fmt.Printf("ConsumerConfig %+v\n", con_config)
-		con, err := sarama.NewConsumer(cl, con_config)
+		con, err := sarama.NewConsumerFromClient(cl)
 		if err != nil {
 			fmt.Printf("ERROR creating consumer: %s\n", err)
 			return
@@ -156,15 +163,7 @@ func main() {
 func publish(cl *sarama.Client, num_partitions int, wg *sync.WaitGroup) {
 	defer wg.Done()
 
-	var prod_conf = sarama.NewProducerConfig()
-	if *NO_RESPONSE {
-		prod_conf.RequiredAcks = sarama.NoResponse // enabling NoResponse also has the side effect of making the publisher send each message to the TCP socket immediately
-	}
-	prod_conf.FlushMsgCount = *FLUSH_MSG_COUNT
-	prod_conf.ChannelBufferSize = *CHANNEL_BUFFER_SIZE
-	prod_conf.Partitioner = sarama.NewRoundRobinPartitioner
-	fmt.Printf("ProducerConfig %+v\n", prod_conf)
-	prod, err := sarama.NewProducer(cl, prod_conf)
+	prod, err := sarama.NewProducerFromClient(cl)
 	if err != nil {
 		fmt.Printf("ERROR creating kafka producer to %q: %s", *KAFKA_TOPIC, err)
 		return
@@ -207,7 +206,7 @@ func publish(cl *sarama.Client, num_partitions int, wg *sync.WaitGroup) {
 		value[8] = byte('n')                     // same, use a uniqish string to ID the messages
 		value[9] = byte('s')
 		value[10] = byte('d')
-		msg := sarama.MessageToSend{Topic: *KAFKA_TOPIC, Value: sarama.ByteEncoder(value)}
+		msg := sarama.ProducerMessage{Topic: *KAFKA_TOPIC, Value: sarama.ByteEncoder(value)}
 		select {
 		case input <- &msg:
 			// great
@@ -231,14 +230,9 @@ func publish(cl *sarama.Client, num_partitions int, wg *sync.WaitGroup) {
 	}
 }
 
-func read_partition(con *sarama.Consumer, partition int32, offset int64, m *Measurements, wg *sync.WaitGroup, ready *sync.WaitGroup) {
+func read_partition(con sarama.Consumer, partition int32, offset int64, m *Measurements, wg *sync.WaitGroup, ready *sync.WaitGroup) {
 	defer wg.Done()
-	pcon_config := sarama.NewPartitionConsumerConfig()
-	pcon_config.OffsetMethod = sarama.OffsetMethodNewest
-	pcon_config.OffsetValue = offset // not really needed unless we use OffsetMethodManual
-	pcon_config.EventBufferSize = *EVENT_BUFFER_SIZE
-	fmt.Printf("PartitionConsumerConfig %+v\n", pcon_config)
-	pcon, err := con.ConsumePartition(*KAFKA_TOPIC, partition, pcon_config)
+	pcon, err := con.ConsumePartition(*KAFKA_TOPIC, partition, sarama.OffsetNewest)
 	if err != nil {
 		fmt.Printf("ERROR creating kafka subscription to %q: %s", *KAFKA_TOPIC, err)
 		return
@@ -250,12 +244,8 @@ func read_partition(con *sarama.Consumer, partition int32, offset int64, m *Meas
 	S := *NUM_SKIP
 	ready.Done()
 	for i := 0; i < N; i++ {
-		ev := <-pcon.Events()
+		ev := <-pcon.Messages()
 		now := time.Now()
-		if ev.Err != nil {
-			fmt.Printf("ERROR receiving kafka message: %s\n", ev.Err)
-			continue
-		}
 		// print in one call to write() so that we don't interleave with writes from other partitions
 		//os.Stdout.WriteString(fmt.Sprintf("ev.Key = %T %s\n%v\n"+ "ev.Value = %T %s\n%v\n", ev.Key, ev.Key, ev.Key, ev.Value, ev.Value, ev.Value))
 		delta := now.UnixNano() - int64(binary.BigEndian.Uint64(ev.Value))
