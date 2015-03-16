@@ -11,7 +11,6 @@ import (
 	"encoding/binary"
 	"flag"
 	"fmt"
-	"github.com/Shopify/sarama"
 	stdlog "log"
 	"math"
 	"os"
@@ -19,6 +18,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Shopify/sarama"
 )
 
 var log = stdlog.New(os.Stderr, "LOG> ", stdlog.Lshortfile|stdlog.Lmicroseconds)
@@ -160,7 +161,7 @@ func main() {
 	}
 }
 
-func publish(cl *sarama.Client, num_partitions int, wg *sync.WaitGroup) {
+func publish(cl sarama.Client, num_partitions int, wg *sync.WaitGroup) {
 	defer wg.Done()
 
 	prod, err := sarama.NewProducerFromClient(cl)
