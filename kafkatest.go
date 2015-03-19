@@ -106,7 +106,7 @@ func main() {
 	fmt.Printf("%q partitions = %v\n", *KAFKA_TOPIC, partitions)
 	offsets := make(map[int32]int64, len(partitions))
 	for _, p := range partitions {
-		offset, err := cl.GetOffset(*KAFKA_TOPIC, p, sarama.LatestOffsets)
+		offset, err := cl.GetOffset(*KAFKA_TOPIC, p, sarama.OffsetNewest)
 		if err != nil {
 			fmt.Printf("ERROR reading offset for partition %d of %q: %s\n", p, *KAFKA_TOPIC, err)
 			return
@@ -160,10 +160,10 @@ func main() {
 	}
 }
 
-func publish(cl *sarama.Client, num_partitions int, wg *sync.WaitGroup) {
+func publish(cl sarama.Client, num_partitions int, wg *sync.WaitGroup) {
 	defer wg.Done()
 
-	prod, err := sarama.NewProducerFromClient(cl)
+	prod, err := sarama.NewAsyncProducerFromClient(cl)
 	if err != nil {
 		fmt.Printf("ERROR creating kafka producer to %q: %s", *KAFKA_TOPIC, err)
 		return
