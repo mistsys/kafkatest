@@ -11,7 +11,6 @@ import (
 	"encoding/binary"
 	"flag"
 	"fmt"
-	"github.com/Shopify/sarama"
 	stdlog "log"
 	"math"
 	"os"
@@ -19,6 +18,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Shopify/sarama"
 )
 
 var log = stdlog.New(os.Stderr, "LOG> ", stdlog.Lshortfile|stdlog.Lmicroseconds)
