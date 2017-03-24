@@ -39,6 +39,8 @@ var MSG_RTT = flag.Bool("rtt", false, "send next message as soon as the previous
 
 var MAX_WAIT_TIME = flag.Int("max-wait-time", 1, "kafka consumer max-wait-time (in msec)")
 var MIN_FETCH_SIZE = flag.Int("min-fetch-size", 1, "kafka consumer min data requested")
+var DEFAULT_FETCH_SIZE = flag.Int("default-fetch-size", 128<<10, "kafka consumer default data requested")
+var MAX_OPEN_REQUESTS = flag.Int("max-open-requests", 5, "kafka consumer max outstanding requests per broker")
 
 var CONSUME_ONLY = flag.Bool("consume-only", false, "only run the kafka consumer half")
 var PUBLISH_ONLY = flag.Bool("publish-only", false, "only run the kafka publisher half")
@@ -75,8 +77,10 @@ func main() {
 	// start a kafka client and listen to the topic
 	conf := sarama.NewConfig()
 	conf.ClientID = "kafkatest"
+	conf.Net.MaxOpenRequests = *MAX_OPEN_REQUESTS
 	conf.Consumer.MaxWaitTime = time.Duration(*MAX_WAIT_TIME) * time.Millisecond // can't go below 1 msec
 	conf.Consumer.Fetch.Min = int32(*MIN_FETCH_SIZE)
+	conf.Consumer.Fetch.Default = int32(*DEFAULT_FETCH_SIZE)
 	if *NO_RESPONSE {
 		conf.Producer.RequiredAcks = sarama.NoResponse // enabling NoResponse also has the side effect of making the publisher send each message to the TCP socket immediately
 	}
